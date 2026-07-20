@@ -13,3 +13,8 @@ rev = "58d362e1777d57a2bb86e5de4f0884f5dff4db05"
 [language_servers.gscode]
 name = "GSCode Language Server"
 languages = ["GSC", "CSC", "GSH"]
+
+[language_servers.gscode.language_ids]
+"GSC" = "gsc"
+"CSC" = "csc"
+"GSH" = "gsh"

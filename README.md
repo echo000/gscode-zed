@@ -13,7 +13,7 @@ A Zed editor extension providing language support for GSC, CSC, and GSH files us
 
 - [Zed Editor](https://zed.dev/) version 0.210.4 or later
 - [Rust](https://rustup.rs/) (for building the extension)
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (for the language server)
+- [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (for the language server)
 
 ### Installing in Zed
 
@@ -24,10 +24,10 @@ A Zed editor extension providing language support for GSC, CSC, and GSH files us
 
 ## Language Server Setup
 
-The extension will automatically download and build the GSCode.NET language server on first use. This requires:
+The extension will automatically download the official GSCode.NET language server from the GSCode VS Code Marketplace package on first use. This requires:
 
-- **.NET 8 SDK** installed and available in your PATH
-- An internet connection to download the language server source from GitHub
+- **.NET 10 Runtime** installed and available in your PATH
+- An internet connection to download the language server package from the Marketplace
 
 ### Custom Language Server Path
 

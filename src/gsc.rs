@@ -1,5 +1,8 @@
-use std::{env, fs};
+use std::{env, fs, path::Path};
 use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
+
+const MARKETPLACE_EXTENSION_QUERY_URL: &str =
+    "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery";
 
 struct GscBinary {
     path: String,
@@ -11,6 +14,56 @@ struct GscExtension {
 }
 
 impl GscExtension {
+    fn latest_marketplace_package() -> Result<(String, String)> {
+        let request_body = zed::serde_json::json!({
+            "filters": [{
+                "criteria": [{
+                    "filterType": 7,
+                    "value": "blakintosh.gscode"
+                }]
+            }],
+            "flags": 103
+        })
+        .to_string()
+        .into_bytes();
+
+        let request = zed::http_client::HttpRequest::builder()
+            .method(zed::http_client::HttpMethod::Post)
+            .url(MARKETPLACE_EXTENSION_QUERY_URL)
+            .header("User-Agent", "gsczed")
+            .header("Accept", "application/json;api-version=7.2-preview.1")
+            .header("Content-Type", "application/json")
+            .body(request_body)
+            .redirect_policy(zed::http_client::RedirectPolicy::FollowAll)
+            .build()?;
+        let response = request.fetch()?;
+        let response_body = String::from_utf8(response.body)
+            .map_err(|e| format!("Marketplace returned invalid UTF-8: {e}"))?;
+        let response_json: zed::serde_json::Value = zed::serde_json::from_str(&response_body)
+            .map_err(|e| format!("failed to parse Marketplace response: {e}"))?;
+
+        let latest_version = &response_json["results"][0]["extensions"][0]["versions"][0];
+        let version = latest_version["version"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "Marketplace response did not contain a GSCode version".to_string())?;
+        let package_url = latest_version["files"]
+            .as_array()
+            .and_then(|files| {
+                files.iter().find_map(|file| {
+                    (file["assetType"].as_str()
+                        == Some("Microsoft.VisualStudio.Services.VSIXPackage"))
+                    .then(|| file["source"].as_str().map(str::to_owned))
+                    .flatten()
+                })
+            })
+            .ok_or_else(|| {
+                "Marketplace response did not contain a raw GSCode VSIX asset".to_string()
+            })?;
+
+        Ok((version, package_url))
+    }
+
     fn language_server_binary(
         &mut self,
         language_server_id: &LanguageServerId,
@@ -45,16 +98,12 @@ impl GscExtension {
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        let release = zed::latest_github_release(
-            "echo000/gscode",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
-
-        let version_dir = format!("gscode-{}", release.version);
-        let binary_path = format!("{version_dir}/GSCode.NET.dll");
+        let (version, package_url) = Self::latest_marketplace_package()?;
+        let version_dir = format!("gscode-{version}");
+        let binary_path = Path::new(&version_dir)
+            .join("extension")
+            .join("service")
+            .join("GSCode.NET.dll");
 
         if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
             zed::set_language_server_installation_status(
@@ -62,27 +111,39 @@ impl GscExtension {
                 &zed::LanguageServerInstallationStatus::Downloading,
             );
 
-            // Find the zip asset from GitHub release
-            let asset_name = "GSCodeLsp.zip";
-            let asset = release
-                .assets
-                .iter()
-                .find(|asset| asset.name == asset_name)
-                .ok_or_else(|| format!("no asset found matching {asset_name:?}"))?;
+            // The upstream GitHub releases no longer attach server binaries. The
+            // Marketplace VSIX is the official distribution and contains the
+            // server plus all of its managed .NET dependencies.
+            if fs::metadata(&version_dir).is_ok() {
+                fs::remove_dir_all(&version_dir)
+                    .map_err(|e| format!("failed to remove incomplete {version_dir}: {e}"))?;
+            }
 
-            zed::download_file(
-                &asset.download_url,
-                &version_dir,
-                zed::DownloadedFileType::Zip,
-            )
-            .map_err(|e| format!("failed to download file: {e}"))?;
+            zed::download_file(&package_url, &version_dir, zed::DownloadedFileType::Zip)
+                .map_err(|e| format!("failed to download GSCode Marketplace package: {e}"))?;
 
-            // Clean up old versions
+            if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
+                return Err(format!(
+                    "GSCode Marketplace package did not contain {}",
+                    binary_path.display()
+                ));
+            }
+
+            // Clean up only older GSCode packages; leave unrelated extension data alone.
             let entries =
                 fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;
             for entry in entries {
                 let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
-                if entry.file_name().to_str() != Some(&version_dir) {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if name.starts_with("gscode-")
+                    && name != version_dir
+                    && entry
+                        .file_type()
+                        .map_err(|e| format!("failed to inspect {name}: {e}"))?
+                        .is_dir()
+                {
                     fs::remove_dir_all(entry.path()).ok();
                 }
             }
@@ -132,6 +193,26 @@ impl zed::Extension for GscExtension {
             args,
             env: Default::default(),
         })
+    }
+
+    fn language_server_initialization_options(
+        &mut self,
+        _language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<zed::serde_json::Value>> {
+        Ok(LspSettings::for_worktree("gscode", worktree)
+            .ok()
+            .and_then(|settings| settings.initialization_options))
+    }
+
+    fn language_server_workspace_configuration(
+        &mut self,
+        _language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<zed::serde_json::Value>> {
+        Ok(LspSettings::for_worktree("gscode", worktree)
+            .ok()
+            .and_then(|settings| settings.settings))
     }
 }
 
